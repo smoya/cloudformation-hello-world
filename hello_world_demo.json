@@ -1,0 +1,275 @@
+{
+  "Description": "HelloWorld demo stack",
+  "Parameters": {
+    "Environment": {
+      "Default": "hello-world-demo",
+      "Description": "The current environment",
+      "Type": "String",
+      "AllowedValues": ["prod", "hello-world-demo"]
+    },
+    "InstanceType": {
+      "Description": "Instance type for our instances",
+      "Type": "String",
+      "Default": "t2.nano"
+    },
+    "KeyName": {
+      "Default": "hello-world-demo",
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    }
+  },
+  "Mappings": {
+    "RegionDetails": {
+      "us-east-1": {
+        "HelloWorldAZ": "us-east-1a",
+        "KeyName": "hello-world-demo",
+        "OfficeCIDR": "8.8.8.8/32",
+        "InternalCIDR": "10.0.1.0/24",
+        "HelloWorldAMI": "ami-60b6c60a"
+      }
+    }
+  },
+  "Resources": {
+    "HelloWorldVPC": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"InternalCIDR"]},
+        "EnableDnsHostnames": true,
+        "Tags": [
+          {
+            "Key": "environment",
+            "Value": {"Ref": "Environment"}
+          }
+        ]
+      }
+    },
+    "HelloWorldSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "AvailabilityZone": {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"HelloWorldAZ"]},
+        "CidrBlock": {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"InternalCIDR"]},
+        "MapPublicIpOnLaunch": true,
+        "VpcId": {"Ref": "HelloWorldVPC"}
+      }
+    },
+    "HelloWorldSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "All ports from our virtual office and the internal CIDR",
+        "VpcId": {"Ref": "HelloWorldVPC"},
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": -1,
+            "CidrIp": {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"InternalCIDR"]}
+          },
+          {
+            "IpProtocol": -1,
+            "CidrIp": {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"OfficeCIDR"]}
+          }
+        ]
+      }
+    },
+    "HelloWorldELB": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Metadata": {
+        "Comment": "Configure the Load Balancer with a simple health check"
+      },
+      "Properties": {
+        "Subnets": [
+          {"Ref": "HelloWorldSubnet"}
+        ],
+        "SecurityGroups": [
+          {"Ref": "HelloWorldSG"}
+        ],
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "InstancePort": "80",
+            "Protocol": "HTTP"
+          }
+        ],
+        "HealthCheck": {
+          "Target": "HTTP:80/",
+          "Interval": "30",
+          "Timeout": "10",
+          "HealthyThreshold": "2",
+          "UnhealthyThreshold": "10"
+        }
+      }
+    },
+    "HelloWorldLC": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "ImageId": {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"HelloWorldAMI"]},
+        "InstanceType": {"Ref": "InstanceType"},
+        "AssociatePublicIpAddress": true,
+        "SecurityGroups": [
+          {"Ref": "HelloWorldSG"}
+        ],
+        "KeyName": {"Ref": "KeyName"},
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "hostname > index.html\n",
+                "python -m SimpleHTTPServer 80"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "HelloWorldAG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "UpdatePolicy": {
+        "AutoScalingScheduledAction": {
+          "IgnoreUnmodifiedGroupSizeProperties": "true"
+        },
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": "1",
+          "MaxBatchSize": "1",
+          "SuspendProcesses": [
+            "ScheduledActions"
+          ]
+        }
+      },
+      "Properties": {
+        "AvailabilityZones": [
+          {"Fn::FindInMap": ["RegionDetails",{"Ref": "AWS::Region"},"HelloWorldAZ"]}
+        ],
+        "LaunchConfigurationName": {"Ref": "HelloWorldLC"},
+        "MinSize": "1",
+        "MaxSize": "3",
+        "DesiredCapacity": "1",
+        "LoadBalancerNames": [
+          {"Ref": "HelloWorldELB"}
+        ],
+        "TerminationPolicies": [
+          "OldestInstance",
+          "OldestLaunchConfiguration",
+          "ClosestToNextInstanceHour"
+        ],
+        "HealthCheckType": "ELB",
+        "VPCZoneIdentifier": [
+          {"Ref": "HelloWorldSubnet"}
+        ],
+        "HealthCheckGracePeriod": 60,
+        "Cooldown": 300,
+        "Tags": [
+          {
+            "Key": "environment",
+            "Value": {"Ref": "Environment"},
+            "PropagateAtLaunch": true
+          }
+        ]
+      }
+    },
+    "HelloWorldScaleUp": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AdjustmentType": "ChangeInCapacity",
+        "AutoScalingGroupName": {"Ref": "HelloWorldAG"},
+        "ScalingAdjustment": "3"
+      }
+    },
+    "HelloWorldScaleDown": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AdjustmentType": "ChangeInCapacity",
+        "AutoScalingGroupName": {"Ref": "HelloWorldAG"},
+        "ScalingAdjustment": "-3"
+      }
+    },
+    "HelloWorldCPUAlarmHigh": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-up if CPU > 60% for 1 minute",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "60",
+        "EvaluationPeriods": "1",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Threshold": "60",
+        "AlarmActions": [
+          {"Ref": "HelloWorldScaleUp"}
+        ],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": {"Ref": "HelloWorldAG"}
+          }
+        ]
+      }
+    },
+    "HelloWorldCPUAlarmLow": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-down if CPU < 10% for 1 minute",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "60",
+        "EvaluationPeriods": "1",
+        "ComparisonOperator": "LessThanThreshold",
+        "Threshold": "10",
+        "AlarmActions": [
+          {"Ref": "HelloWorldScaleDown"}
+        ],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": {"Ref": "HelloWorldAG"}
+          }
+        ]
+      }
+    },
+    "HelloWorldGateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "environment",
+            "Value": {"Ref": "Environment"}
+          }
+        ]
+      }
+    },
+    "HelloWorldAttachGateway": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {"Ref": "HelloWorldVPC"},
+        "InternetGatewayId": {"Ref": "HelloWorldGateway"}
+      }
+    },
+    "HelloWorldRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {"Ref": "HelloWorldVPC"}
+      }
+    },
+    "HelloWorldRoute": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": {"Ref": "HelloWorldRouteTable"},
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {"Ref": "HelloWorldGateway"}
+      }
+    },
+    "HelloWorldSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {"Ref": "HelloWorldSubnet"},
+        "RouteTableId": {"Ref": "HelloWorldRouteTable"}
+      }
+    }
+  },
+  "Outputs": {
+    "CreatedLoadBalancer": {
+      "Description": "Our new Load Balancer",
+      "Value": {"Ref": "HelloWorldELB"}
+    }
+  }
+}
